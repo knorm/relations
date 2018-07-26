@@ -59,30 +59,148 @@ describe('KnormRelations', () => {
     id: { type: 'integer', primary: true, updated: false }
   };
 
-  class User extends Model {}
-  User.table = 'user';
-  User.fields = {
-    name: { type: 'string', required: true },
-    confirmed: 'boolean'
-  };
-
-  class ImageCategory extends Model {}
-  ImageCategory.table = 'image_category';
-  ImageCategory.fields = { name: { type: 'string', required: true } };
-
-  class Image extends Model {}
-  Image.table = 'image';
-  Image.fields = {
-    userId: { type: 'integer', references: User.fields.id },
-    categoryId: { type: 'integer', references: ImageCategory.fields.id }
-  };
-
   class Message extends Model {}
   Message.table = 'message';
   Message.fields = {
     text: { type: 'text', required: true },
-    senderId: { type: 'integer', references: User.fields.id },
-    receiverId: { type: 'integer', references: User.fields.id }
+    read: { type: 'boolean', default: false },
+    senderId: {
+      type: 'integer',
+      references() {
+        return User.fields.id;
+      }
+    },
+    receiverId: {
+      type: 'integer',
+      references() {
+        return User.fields.id;
+      }
+    },
+    sender: {
+      type: 'reference',
+      references() {
+        return {
+          field: this.fields.senderId,
+          options: { first: true }
+        };
+      }
+    },
+    receiver: {
+      type: 'reference',
+      references() {
+        return {
+          field: this.fields.receiverId,
+          options: { first: true }
+        };
+      }
+    }
+  };
+
+  class Friends extends Model {}
+  Friends.table = 'friends';
+  Friends.fields = {
+    userId: {
+      type: 'integer',
+      references() {
+        return User.fields.id;
+      }
+    },
+    friendId: {
+      type: 'integer',
+      references() {
+        return User.fields.id;
+      }
+    },
+    user: {
+      type: 'reference',
+      references() {
+        return {
+          field: this.fields.userId,
+          options: { first: true }
+        };
+      }
+    },
+    friend: {
+      type: 'reference',
+      references() {
+        return {
+          field: this.fields.friendId,
+          options: { first: true }
+        };
+      }
+    }
+  };
+
+  class Image extends Model {}
+  Image.table = 'image';
+  Image.fields = {
+    userId: {
+      type: 'integer',
+      references() {
+        return User.fields.id;
+      }
+    },
+    categoryId: {
+      type: 'integer',
+      references() {
+        return ImageCategory.fields.id;
+      }
+    },
+    user: {
+      type: 'reference',
+      references() {
+        return {
+          field: this.fields.userId,
+          options: { first: true }
+        };
+      }
+    },
+    category: {
+      type: 'reference',
+      references() {
+        return {
+          field: this.fields.categoryId,
+          options: { first: true }
+        };
+      }
+    }
+  };
+
+  class User extends Model {}
+  User.table = 'user';
+  User.fields = {
+    name: { type: 'string', required: true },
+    confirmed: 'boolean',
+    messages: {
+      type: 'reference',
+      references: Message.fields.receiverId
+    },
+    readMessages: {
+      type: 'reference',
+      references: {
+        field: Message.fields.receiverId,
+        options: { where: { read: true } }
+      }
+    },
+    sentMessages: {
+      type: 'reference',
+      references: Message.fields.senderId
+    },
+    images: {
+      type: 'reference',
+      references: Image.fields.userId
+    },
+    friends: {
+      type: 'reference',
+      references: { field: Friends.fields.friendId, via: Friends.fields.userId }
+    }
+  };
+
+  class ImageCategory extends Model {}
+  ImageCategory.table = 'image_category';
+  ImageCategory.fields = {
+    name: { type: 'string', required: true },
+    images: { type: 'reference', references: Image.fields.categoryId }
   };
 
   before(async () => {
@@ -110,6 +228,7 @@ describe('KnormRelations', () => {
       table.increments();
       table.timestamps();
       table.text('text').notNullable();
+      table.boolean('read').notNullable();
       table
         .integer('sender_id')
         .references('id')
