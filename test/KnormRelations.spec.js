@@ -877,7 +877,7 @@ describe('KnormRelations', () => {
         });
 
         describe("with 'orderBy' configured on the joined query", () => {
-          it.only('fulfils the requested order on the joined model', async () => {
+          it('fulfils the requested order on the joined model', async () => {
             await Image.insert({ id: 2, userId: 1, categoryId: 1 });
             await User.insert({ id: 3, name: 'User 3' });
             await Image.insert({ id: 3, userId: 3, categoryId: 1 });
