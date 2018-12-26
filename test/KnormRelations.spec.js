@@ -4,9 +4,11 @@ const knormPostgres = require('@knorm/postgres');
 const KnormRelations = require('../lib/KnormRelations');
 const knormRelations = require('../');
 const knex = require('./lib/knex');
+const sinon = require('sinon');
 const expect = require('unexpected')
   .clone()
   .use(require('unexpected-knex'))
+  .use(require('unexpected-sinon'))
   .addAssertion(
     '<Promise> to be fulfilled with sorted rows [exhaustively] satisfying <array>',
     (expect, subject, value) => {
@@ -93,6 +95,27 @@ describe('KnormRelations', () => {
     receiverId: { type: 'integer', references: User.fields.id }
   };
 
+  class Group extends Model {}
+  Group.table = 'group';
+  Group.fields = {
+    name: { type: 'string', required: true }
+  };
+
+  class GroupMembership extends Model {}
+  GroupMembership.table = 'group_membership';
+  GroupMembership.fields = {
+    name: 'string',
+    userId: { type: 'integer', references: User.fields.id },
+    groupId: { type: 'integer', references: Group.fields.id }
+  };
+
+  class Friendship extends Model {}
+  Friendship.table = 'friendship';
+  Friendship.fields = {
+    userId: { type: 'integer', references: User.fields.id },
+    friendId: { type: 'integer', references: User.fields.id }
+  };
+
   before(async () => {
     await knex.schema.createTable(User.table, table => {
       table.increments();
@@ -127,6 +150,33 @@ describe('KnormRelations', () => {
         .references('id')
         .inTable(User.table);
     });
+    await knex.schema.createTable(Group.table, table => {
+      table.increments();
+      table.string('name').notNullable();
+    });
+    await knex.schema.createTable(GroupMembership.table, table => {
+      table.increments();
+      table.string('name');
+      table
+        .integer('user_id')
+        .references('id')
+        .inTable(User.table);
+      table
+        .integer('group_id')
+        .references('id')
+        .inTable(Group.table);
+    });
+    await knex.schema.createTable(Friendship.table, table => {
+      table.increments();
+      table
+        .integer('user_id')
+        .references('id')
+        .inTable(User.table);
+      table
+        .integer('friend_id')
+        .references('id')
+        .inTable(User.table);
+    });
 
     await User.insert([
       { id: 1, name: 'User 1', confirmed: null },
@@ -141,6 +191,9 @@ describe('KnormRelations', () => {
   });
 
   after(async () => {
+    await knex.schema.dropTable(Friendship.table);
+    await knex.schema.dropTable(GroupMembership.table);
+    await knex.schema.dropTable(Group.table);
     await knex.schema.dropTable(Message.table);
     await knex.schema.dropTable(Image.table);
     await knex.schema.dropTable(ImageCategory.table);
@@ -1415,20 +1468,30 @@ describe('KnormRelations', () => {
       });
 
       describe("with an 'innerJoin' configured", () => {
-        it('returns the instances with matching data in the joined table (inner join)', async () => {
+        it('returns the instances with matching data in the joined table (INNER JOIN)', async () => {
           const query = new Query(User).innerJoin(new Query(Image));
+          const spy = sinon.spy(query, 'query');
           await expect(
             query.fetch(),
             'to be fulfilled with sorted rows satisfying',
             [new User({ id: 1, name: 'User 1', image: [new Image({ id: 1 })] })]
           );
+          await expect(spy, 'to have calls satisfying', () => {
+            spy(
+              expect.it(
+                'when passed as parameter to',
+                sql => sql.toString(),
+                'to contain',
+                ' INNER JOIN '
+              )
+            );
+          });
         });
 
         it("resolves with an empty array if the join doesn't match any rows", async () => {
           const query = new Query(User)
             .where({ id: 2 })
             .innerJoin(new Query(Image));
-
           await expect(
             query.fetch(),
             'to be fulfilled with sorted rows exhaustively satisfying',
@@ -1438,25 +1501,972 @@ describe('KnormRelations', () => {
       });
 
       describe("with a 'join' configured", () => {
-        it('returns the instances with matching data in the joined table (inner join)', async () => {
+        it('returns the instances with matching data in the joined table (JOIN)', async () => {
           const query = new Query(User).join(new Query(Image));
+          const spy = sinon.spy(query, 'query');
           await expect(
             query.fetch(),
             'to be fulfilled with sorted rows satisfying',
             [new User({ id: 1, name: 'User 1', image: [new Image({ id: 1 })] })]
           );
+          await expect(spy, 'to have calls satisfying', () => {
+            spy(
+              expect.it(
+                'when passed as parameter to',
+                sql => sql.toString(),
+                'to contain',
+                ' JOIN '
+              )
+            );
+          });
         });
 
         it("resolves wih an empty array if the join doesn't match any rows", async () => {
-          const query = new Query(User)
-            .where({ id: 2 })
-            .innerJoin(new Query(Image));
-
+          const query = new Query(User).where({ id: 2 }).join(new Query(Image));
           await expect(
             query.fetch(),
             'to be fulfilled with sorted rows exhaustively satisfying',
             []
           );
+        });
+      });
+
+      describe('with a `via` configured', () => {
+        before(async () => {
+          await User.insert([
+            { id: 3, name: 'User 3' },
+            { id: 4, name: 'User 4' }
+          ]);
+          await Group.insert([
+            { id: 1, name: 'Group 1' },
+            { id: 2, name: 'Group 2' }
+          ]);
+          await GroupMembership.insert([
+            { id: 1, userId: 1, groupId: 1 },
+            { id: 2, userId: 2, groupId: 2 },
+            { id: 3, userId: 3, groupId: 2 }
+          ]);
+        });
+
+        after(async () => {
+          await GroupMembership.delete();
+          await Group.delete();
+          await User.delete({ where: User.where.in({ id: [3, 4] }) });
+        });
+
+        it('rejects if a model has no references to the join query', async () => {
+          await expect(
+            new Query(User)
+              .leftJoin(new Query(Image).via(new Query(GroupMembership)))
+              .fetch(),
+            'to be rejected with error satisfying',
+            new Query.QueryError(
+              'GroupMembership: there are no references to `Image`'
+            )
+          );
+          await expect(
+            new Query(Image)
+              .leftJoin(new Query(User).via(new Query(GroupMembership)))
+              .fetch(),
+            'to be rejected with error satisfying',
+            new Query.QueryError(
+              'Image: there are no references to `GroupMembership`'
+            )
+          );
+        });
+
+        it('uses the join query for a many-to-many relation', async () => {
+          const query = new Query(User).leftJoin(
+            new Query(Group).via(new Query(GroupMembership)).as('groups')
+          );
+          await expect(
+            query.fetch(),
+            'to be fulfilled with sorted rows exhaustively satisfying',
+            [
+              new User({
+                id: 1,
+                name: 'User 1',
+                confirmed: null,
+                creator: null,
+                groups: [new Group({ id: 1, name: 'Group 1' })]
+              }),
+              new User({
+                id: 2,
+                name: 'User 2',
+                confirmed: true,
+                creator: null,
+                groups: [new Group({ id: 2, name: 'Group 2' })]
+              }),
+              new User({
+                id: 3,
+                name: 'User 3',
+                confirmed: null,
+                creator: null,
+                groups: [new Group({ id: 2, name: 'Group 2' })]
+              }),
+              new User({
+                id: 4,
+                name: 'User 4',
+                confirmed: null,
+                creator: null,
+                groups: null
+              })
+            ]
+          );
+        });
+
+        describe('with `on` configured', () => {
+          class OtherGroupMembership extends GroupMembership {}
+          OtherGroupMembership.fields = {
+            name: {
+              type: 'string',
+              references: [User.fields.name, Group.fields.name]
+            }
+          };
+
+          it('supports join fields as strings', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(
+                  new Query(OtherGroupMembership).on({
+                    User: 'userId',
+                    Group: 'groupId'
+                  })
+                )
+                .as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+
+          it('supports join fields as Field instances', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(
+                  new Query(OtherGroupMembership).on({
+                    User: GroupMembership.fields.userId,
+                    Group: GroupMembership.fields.groupId
+                  })
+                )
+                .as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+
+          it('supports join fields as Field instances from the other model', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(
+                  new Query(OtherGroupMembership).on({
+                    User: User.fields.id,
+                    Group: Group.fields.id
+                  })
+                )
+                .as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+
+          it('supports configuring join fields for the first side of the relation', async () => {
+            class OtherGroupMembership extends GroupMembership {}
+            OtherGroupMembership.fields = {
+              name: {
+                type: 'string',
+                references: User.fields.name
+              }
+            };
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(
+                  new Query(OtherGroupMembership).on({ User: User.fields.id })
+                )
+                .as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+
+          it('supports configuring join fields for the second side of the relation', async () => {
+            class OtherGroupMembership extends GroupMembership {}
+            OtherGroupMembership.fields = {
+              name: {
+                type: 'string',
+                references: Group.fields.name
+              }
+            };
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(
+                  new Query(OtherGroupMembership).on({ Group: Group.fields.id })
+                )
+                .as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+
+          // this is tested under self-referencing many-to-many joins
+          // it('supports configuring a single join field for both sides of the relation');
+        });
+
+        describe('with a model instead of a query instance', () => {
+          it('creates a join query from the model', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group).via(GroupMembership).as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+
+          it('supports setting join query options via an object', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(GroupMembership, {
+                  on: { User: 'userId', Group: 'groupId' }
+                })
+                .as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] }),
+                new User({ id: 4, groups: null })
+              ]
+            );
+          });
+        });
+
+        describe('with `joinType` onfigured', () => {
+          it('allows configuring the join type for the first side of the join', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(GroupMembership, { joinType: { User: 'innerJoin' } })
+                .as('groups')
+            );
+            const spy = sinon.spy(query, 'query');
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] })
+              ]
+            );
+            await expect(spy, 'to have calls satisfying', () => {
+              spy(
+                expect.it(
+                  'when passed as parameter to',
+                  sql => sql.toString(),
+                  'to satisfy',
+                  stringSql =>
+                    expect(
+                      stringSql,
+                      'to contain',
+                      'INNER JOIN "group_membership"'
+                    ).and('to contain', 'LEFT JOIN "group"')
+                )
+              );
+            });
+          });
+
+          it('allows configuring the join type for the second side of the join', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(GroupMembership, { joinType: { Group: 'innerJoin' } })
+                .as('groups')
+            );
+            const spy = sinon.spy(query, 'query');
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] })
+              ]
+            );
+            await expect(spy, 'to have calls satisfying', () => {
+              spy(
+                expect.it(
+                  'when passed as parameter to',
+                  sql => sql.toString(),
+                  'to satisfy',
+                  stringSql =>
+                    expect(
+                      stringSql,
+                      'to contain',
+                      'LEFT JOIN "group_membership"'
+                    ).and('to contain', 'INNER JOIN "group"')
+                )
+              );
+            });
+          });
+
+          it('allows configuring a different join type for each side of the join', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(GroupMembership, {
+                  joinType: { User: 'innerJoin', Group: 'leftJoin' }
+                })
+                .as('groups')
+            );
+            const spy = sinon.spy(query, 'query');
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] })
+              ]
+            );
+            await expect(spy, 'to have calls satisfying', () => {
+              spy(
+                expect.it(
+                  'when passed as parameter to',
+                  sql => sql.toString(),
+                  'to satisfy',
+                  stringSql =>
+                    expect(
+                      stringSql,
+                      'to contain',
+                      'INNER JOIN "group_membership"'
+                    ).and('to contain', 'LEFT JOIN "group"')
+                )
+              );
+            });
+          });
+
+          it('allows configuring a single join type for both sides of the join', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(Group)
+                .via(GroupMembership, { joinType: 'innerJoin' })
+                .as('groups')
+            );
+            const spy = sinon.spy(query, 'query');
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, groups: [new Group({ id: 1 })] }),
+                new User({ id: 2, groups: [new Group({ id: 2 })] }),
+                new User({ id: 3, groups: [new Group({ id: 2 })] })
+              ]
+            );
+            await expect(spy, 'to have calls satisfying', () => {
+              spy(
+                expect.it(
+                  'when passed as parameter to',
+                  sql => sql.toString(),
+                  'to satisfy',
+                  stringSql =>
+                    expect(
+                      stringSql,
+                      'to contain',
+                      'INNER JOIN "group_membership"'
+                    ).and('to contain', 'INNER JOIN "group"')
+                )
+              );
+            });
+          });
+        });
+
+        describe('for self-referencing many-to-many relations', () => {
+          before(async () => {
+            await Friendship.insert([
+              { id: 1, userId: 1, friendId: 2 },
+              { id: 2, userId: 2, friendId: 1 }
+            ]);
+          });
+
+          after(async () => {
+            await Friendship.delete();
+          });
+
+          it('works without requiring join fields configured via `on`', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(User).via(new Query(Friendship)).as('friends')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows exhaustively satisfying',
+              [
+                new User({
+                  id: 1,
+                  name: 'User 1',
+                  confirmed: null,
+                  creator: null,
+                  friends: [
+                    new User({
+                      id: 2,
+                      name: 'User 2',
+                      confirmed: true,
+                      creator: null
+                    })
+                  ]
+                }),
+                new User({
+                  id: 2,
+                  name: 'User 2',
+                  confirmed: true,
+                  creator: null,
+                  friends: [
+                    new User({
+                      id: 1,
+                      name: 'User 1',
+                      confirmed: null,
+                      creator: null
+                    })
+                  ]
+                }),
+                new User({
+                  id: 3,
+                  name: 'User 3',
+                  confirmed: null,
+                  creator: null,
+                  friends: null
+                }),
+                new User({
+                  id: 4,
+                  name: 'User 4',
+                  confirmed: null,
+                  creator: null,
+                  friends: null
+                })
+              ]
+            );
+          });
+
+          it('works when references are configured with reference functions', async () => {
+            class OtherFriendship extends Friendship {}
+            OtherFriendship.fields = {
+              userId: {
+                type: 'integer',
+                references() {
+                  return User.fields.id;
+                }
+              },
+              friendId: {
+                type: 'integer',
+                references() {
+                  return User.fields.id;
+                }
+              }
+            };
+            const query = new Query(User).leftJoin(
+              new Query(User).via(new Query(OtherFriendship)).as('friends')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, friends: [new User({ id: 2 })] }),
+                new User({ id: 2, friends: [new User({ id: 1 })] }),
+                new User({ id: 3, friends: null }),
+                new User({ id: 4, friends: null })
+              ]
+            );
+          });
+
+          it('works when multiple references are configured', async () => {
+            class OtherFriendship extends Friendship {}
+            OtherFriendship.fields = {
+              userId: {
+                type: 'integer',
+                references: [User.fields.id, Group.fields.id]
+              },
+              friendId: {
+                type: 'integer',
+                references: [User.fields.id, Group.fields.id]
+              }
+            };
+            const query = new Query(User).leftJoin(
+              new Query(User).via(new Query(OtherFriendship)).as('friends')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, friends: [new User({ id: 2 })] }),
+                new User({ id: 2, friends: [new User({ id: 1 })] }),
+                new User({ id: 3, friends: null }),
+                new User({ id: 4, friends: null })
+              ]
+            );
+          });
+
+          it('supports configuring a join field for the first side of the relation', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(User)
+                .via(new Query(Friendship))
+                .on({ User: Friendship.fields.userId })
+                .as('friends')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, friends: [new User({ id: 2 })] }),
+                new User({ id: 2, friends: [new User({ id: 1 })] }),
+                new User({ id: 3 }),
+                new User({ id: 4 })
+              ]
+            );
+          });
+
+          it('supports configuring a join join field for the second side of the relation', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(User)
+                .via(new Query(Friendship))
+                .on({ User: Friendship.fields.friendId })
+                .as('friends')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, friends: [new User({ id: 2 })] }),
+                new User({ id: 2, friends: [new User({ id: 1 })] }),
+                new User({ id: 3 }),
+                new User({ id: 4 })
+              ]
+            );
+          });
+
+          it('supports configuring a single join field for both sides of the relation', async () => {
+            const query = new Query(User).leftJoin(
+              new Query(User)
+                .via(new Query(Friendship))
+                .on('id')
+                .as('friends')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({ id: 1, friends: [new User({ id: 2 })] }),
+                new User({ id: 2, friends: [new User({ id: 1 })] }),
+                new User({ id: 3 }),
+                new User({ id: 4 })
+              ]
+            );
+          });
+        });
+
+        describe('for an `innerJoin`', () => {
+          // because there's no actual join between the two queries
+          it('resolves with the same data as for a `leftJoin`', async () => {
+            const query = new Query(User).innerJoin(
+              new Query(Group).via(new Query(GroupMembership)).as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows exhaustively satisfying',
+              [
+                new User({
+                  id: 1,
+                  name: 'User 1',
+                  confirmed: null,
+                  creator: null,
+                  groups: [new Group({ id: 1, name: 'Group 1' })]
+                }),
+                new User({
+                  id: 2,
+                  name: 'User 2',
+                  confirmed: true,
+                  creator: null,
+                  groups: [new Group({ id: 2, name: 'Group 2' })]
+                }),
+                new User({
+                  id: 3,
+                  name: 'User 3',
+                  confirmed: null,
+                  creator: null,
+                  groups: [new Group({ id: 2, name: 'Group 2' })]
+                }),
+                new User({
+                  id: 4,
+                  name: 'User 4',
+                  confirmed: null,
+                  creator: null,
+                  groups: null
+                })
+              ]
+            );
+          });
+        });
+
+        describe('for a `join`', () => {
+          // because there's no actual join between the two queries
+          it('resolves with the same data as for a `leftJoin`', async () => {
+            const query = new Query(User).join(
+              new Query(Group).via(new Query(GroupMembership)).as('groups')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows exhaustively satisfying',
+              [
+                new User({
+                  id: 1,
+                  name: 'User 1',
+                  confirmed: null,
+                  creator: null,
+                  groups: [new Group({ id: 1, name: 'Group 1' })]
+                }),
+                new User({
+                  id: 2,
+                  name: 'User 2',
+                  confirmed: true,
+                  creator: null,
+                  groups: [new Group({ id: 2, name: 'Group 2' })]
+                }),
+                new User({
+                  id: 3,
+                  name: 'User 3',
+                  confirmed: null,
+                  creator: null,
+                  groups: [new Group({ id: 2, name: 'Group 2' })]
+                }),
+                new User({
+                  id: 4,
+                  name: 'User 4',
+                  confirmed: null,
+                  creator: null,
+                  groups: null
+                })
+              ]
+            );
+          });
+        });
+
+        describe('for reverse-references', () => {
+          it('resolves with the correct data', async () => {
+            const query = new Query(Group).leftJoin(
+              new Query(User)
+                .via(new Query(GroupMembership))
+                .orderBy('id')
+                .as('users')
+            );
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows exhaustively satisfying',
+              [
+                new Group({
+                  id: 1,
+                  name: 'Group 1',
+                  users: [
+                    new User({
+                      id: 1,
+                      name: 'User 1',
+                      confirmed: null,
+                      creator: null
+                    })
+                  ]
+                }),
+                new Group({
+                  id: 2,
+                  name: 'Group 2',
+                  users: [
+                    new User({
+                      id: 2,
+                      name: 'User 2',
+                      confirmed: true,
+                      creator: null
+                    }),
+                    new User({
+                      id: 3,
+                      name: 'User 3',
+                      confirmed: null,
+                      creator: null
+                    })
+                  ]
+                })
+              ]
+            );
+          });
+
+          describe('with `on` configured', () => {
+            class OtherGroupMembership extends GroupMembership {}
+            OtherGroupMembership.fields = {
+              name: {
+                type: 'string',
+                references: [User.fields.name, Group.fields.name]
+              }
+            };
+
+            it('supports join fields as strings', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(
+                    new Query(OtherGroupMembership).on({
+                      User: 'userId',
+                      Group: 'groupId'
+                    })
+                  )
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('supports join fields as Field instances', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(
+                    new Query(OtherGroupMembership).on({
+                      User: GroupMembership.fields.userId,
+                      Group: GroupMembership.fields.groupId
+                    })
+                  )
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('supports join fields as Field instances from the other model', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(
+                    new Query(OtherGroupMembership).on({
+                      User: User.fields.id,
+                      Group: Group.fields.id
+                    })
+                  )
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('supports configuring join fields for the first side of the relation', async () => {
+              class OtherGroupMembership extends GroupMembership {}
+              OtherGroupMembership.fields = {
+                name: {
+                  type: 'string',
+                  references: User.fields.name
+                }
+              };
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(
+                    new Query(OtherGroupMembership).on({ User: User.fields.id })
+                  )
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('supports configuring join fields for the second side of the relation', async () => {
+              class OtherGroupMembership extends GroupMembership {}
+              OtherGroupMembership.fields = {
+                name: {
+                  type: 'string',
+                  references: Group.fields.name
+                }
+              };
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(
+                    new Query(OtherGroupMembership).on({
+                      Group: Group.fields.id
+                    })
+                  )
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+          });
+
+          describe('with `joinType` configured', () => {
+            it('allows configuring the join type for the first side of the join', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(GroupMembership, { joinType: { Group: 'innerJoin' } })
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('allows configuring the join type for the second side of the join', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(GroupMembership, { joinType: { User: 'innerJoin' } })
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('allows configuring a different join type for each side of the join', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(GroupMembership, {
+                    joinType: { Group: 'innerJoin', User: 'leftJoin' }
+                  })
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+
+            it('allows configuring a single join type for both sides of the join', async () => {
+              const query = new Query(Group).leftJoin(
+                new Query(User)
+                  .via(GroupMembership, { joinType: 'innerJoin' })
+                  .orderBy('id')
+                  .as('users')
+              );
+              await expect(
+                query.fetch(),
+                'to be fulfilled with sorted rows satisfying',
+                [
+                  new Group({ id: 1, users: [new User({ id: 1 })] }),
+                  new Group({
+                    id: 2,
+                    users: [new User({ id: 2 }), new User({ id: 3 })]
+                  })
+                ]
+              );
+            });
+          });
         });
       });
 
