@@ -1531,7 +1531,7 @@ describe('KnormRelations', () => {
         });
       });
 
-      describe('with a `via` configured', () => {
+      describe('with `via` configured', () => {
         before(async () => {
           await User.insert([
             { id: 3, name: 'User 3' },
@@ -2467,6 +2467,72 @@ describe('KnormRelations', () => {
               );
             });
           });
+        });
+      });
+
+      describe.only('with `asJoinQuery` configured', () => {
+        before(async () => {
+          await User.insert([
+            { id: 3, name: 'User 3' },
+            { id: 4, name: 'User 4' }
+          ]);
+          await Group.insert([
+            { id: 1, name: 'Group 1' },
+            { id: 2, name: 'Group 2' }
+          ]);
+          await GroupMembership.insert([
+            { id: 1, userId: 1, groupId: 1 },
+            { id: 2, userId: 2, groupId: 2 },
+            { id: 3, userId: 3, groupId: 2 }
+          ]);
+        });
+
+        after(async () => {
+          await GroupMembership.delete();
+          await Group.delete();
+          await User.delete({ where: User.where.in({ id: [3, 4] }) });
+        });
+
+        it('uses the query as a join query', async () => {
+          const query = new Query(User).leftJoin(
+            new Query(GroupMembership)
+              .leftJoin(new Query(Group).as('groups'))
+              .asJoinQuery(true)
+          );
+          await expect(
+            query.fetch(),
+            'to be fulfilled with sorted rows exhaustively satisfying',
+            [
+              new User({
+                id: 1,
+                name: 'User 1',
+                confirmed: null,
+                creator: null,
+                groups: [new Group({ id: 1, name: 'Group 1' })]
+              }),
+              new User({
+                id: 2,
+                name: 'User 2',
+                confirmed: true,
+                creator: null,
+                groups: [new Group({ id: 2, name: 'Group 2' })]
+              }),
+              new User({
+                id: 3,
+                name: 'User 3',
+                confirmed: null,
+                creator: null,
+                groups: [new Group({ id: 2, name: 'Group 2' })]
+              }),
+              new User({
+                id: 4,
+                name: 'User 4',
+                confirmed: null,
+                creator: null,
+                groups: null
+              })
+            ]
+          );
         });
       });
 
