@@ -1,6 +1,7 @@
 const { snakeCase: fieldToColumn } = require('lodash');
 const knorm = require('@knorm/knorm');
 const knormPostgres = require('@knorm/postgres');
+const knormPaginate = require('@knorm/paginate');
 const KnormRelations = require('../lib/KnormRelations');
 const knormRelations = require('../');
 const knex = require('./lib/knex');
@@ -23,6 +24,7 @@ describe('KnormRelations', () => {
   before(() => {
     const orm = knorm({ fieldToColumn, debug: true })
       .use(knormPostgres({ connection: knex.client.config.connection }))
+      .use(knormPaginate())
       .use(knormRelations());
 
     Query = orm.Query;
@@ -533,6 +535,28 @@ describe('KnormRelations', () => {
           );
         });
 
+        it('supports paginated queries with joins via @knorm/paginate', async () => {
+          const query = new Query(User)
+            .page(1)
+            .perPage(10)
+            .where({ id: 1 })
+            .leftJoin(new Query(Image));
+
+          await expect(
+            query.fetch(),
+            'to be fulfilled with value satisfying',
+            {
+              rows: [new User({
+                id: 1,
+                name: 'User 1',
+                image: [
+                  expect.it('to exhaustively satisfy', new Image({ id: 1 }))
+                ]
+              })]
+            }
+          );
+        });
+
         describe("with 'fields' configured on the joined query", () => {
           it('returns only the requested fields from the joined model', async () => {
             const query = new Query(User)
@@ -585,6 +609,27 @@ describe('KnormRelations', () => {
                   id: 1,
                   name: 'User 1',
                   image: [new Image({ id: 1 })]
+                })
+              ]
+            );
+          });
+
+          it('supports paginated queries with joins via @knorm/paginate', async () => {
+            const query = new Query(User)
+              .page(1)
+              .perPage(10)
+              .where({ id: 1 })
+              .leftJoin(new Query(Image).fields('id'));
+            await expect(
+              query.fetch(),
+              'to be fulfilled with sorted rows satisfying',
+              [
+                new User({
+                  id: 1,
+                  name: 'User 1',
+                  image: [
+                    expect.it('to exhaustively satisfy', new Image({ id: 1 }))
+                  ]
                 })
               ]
             );
