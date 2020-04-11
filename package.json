@@ -38,7 +38,7 @@
     "semantic-release": "15.13.24",
     "sinon": "8.1.1",
     "unexpected": "11.13.0",
-    "unexpected-knex": "2.0.0",
+    "unexpected-knex": "3.0.0",
     "unexpected-sinon": "10.11.2"
   },
   "directories": {
