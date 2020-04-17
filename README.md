@@ -7,4 +7,4 @@
 
 Relations plugin for [@knorm/knorm](https://www.npmjs.com/package/@knorm/knorm).
 
-## ## Moved to https://github.com/knorm/knorm/tree/master/packages/relations
+## Moved to https://github.com/knorm/knorm/tree/master/packages/relations
